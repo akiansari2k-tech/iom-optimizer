@@ -103,13 +103,12 @@ st.set_page_config(page_title="IOM Sail Trim Optimizer", layout="centered")
 st.title("⛵ IOM Sail Trim Optimizer")
 
 st.sidebar.header("Wind Conditions")
-TWS = st.sidebar.slider("True Wind Speed (m/s)", 1.0, 6.0, 4.0, 0.1)
-TWA = st.sidebar.slider("True Wind Angle (°)", 30, 180, 45, 1)
-
+TWS = st.sidebar.slider("True Wind Speed (m/s)", min_value=1.0, max_value=6.0, value=4.0, step=0.1)
+TWA = st.sidebar.slider("True Wind Angle (°)", min_value=30, max_value=180, value=45, step=1) 
 st.sidebar.header("Trim Controls (manual test)")
-sheet = st.sidebar.slider("Sheet angle (°)", 5, 25, 15, 0.5)
-twist = st.sidebar.slider("Twist (° foot→head)", 0, 10, 5, 0.5)
-camber = st.sidebar.slider("Camber fraction", 0.05, 0.2, 0.1, 0.005)
+sheet = st.sidebar.slider("Sheet angle (°)", min_value=5.0, max_value=25.0, value=15.0, step=0.5)
+twist = st.sidebar.slider("Twist (° foot→head)", min_value=0.0, max_value=10.0, value=5.0, step=0.5)
+camber = st.sidebar.slider("Camber fraction", min_value=0.05, max_value=0.2, value=0.1, step=0.005)
 
 # Manual prediction
 st.subheader("Manual Trim Prediction")
