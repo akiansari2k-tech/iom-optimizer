@@ -1,5 +1,5 @@
-# iom_app.py – International One Metre (IOM) Sail Trim Optimizer
-# Streamlit app to optimise VMG by adjusting sheet, twist, and camber
+# iom_app.py – International One Metre (IOM) Sail Trim Optimizer
+# Ready for Streamlit Community Cloud
 
 import streamlit as st
 import numpy as np
@@ -25,7 +25,7 @@ HEEL_STIFFNESS = 0.07   # m lever arm per rad (approx small‑angle stiffness)
 # Aerodynamic model
 # ------------------------------------------------------------------
 def sail_forces(AWA, AWS, sheet, twist, camber):
-    """Return drive, side, and heeling‑moment from sails."""
+    """Return drive, side, and heeling moment from sails."""
     z = np.linspace(0, SAIL_HEIGHT, 8)
     c = SAIL_AREA / SAIL_HEIGHT * np.ones_like(z)
     twist_prof = twist * (z / SAIL_HEIGHT)
@@ -73,9 +73,10 @@ def boat_equilibrium(TWA, TWS, sheet, twist, camber):
         if abs(err) < 0.01:
             break
 
-   ratio = M_heel / max(DISPLACEMENT * G * HEEL_STIFFNESS, 1e-6)
-ratio = max(-1.0, min(1.0, ratio))  # clamp between -1 and 1
-heel = np.degrees(np.arcsin(ratio))
+    # Safe heel‑angle calculation
+    ratio = M_heel / max(DISPLACEMENT * G * HEEL_STIFFNESS, 1e-6)
+    ratio = max(-1.0, min(1.0, ratio))  # clamp between -1 and 1
+    heel = np.degrees(np.arcsin(ratio))
 
     return max(Vb, 0), heel
 
@@ -101,32 +102,33 @@ def optimize_trim(TWA, TWS):
 # Streamlit interface
 # ------------------------------------------------------------------
 st.set_page_config(page_title="IOM Sail Trim Optimizer", layout="centered")
-st.title("⛵ IOM Sail Trim Optimizer")
+st.title("⛵ IOM Sail Trim Optimizer")
 
 st.sidebar.header("Wind Conditions")
 TWS = st.sidebar.slider("True Wind Speed (m/s)", min_value=1.0, max_value=6.0, value=4.0, step=0.1)
-TWA = st.sidebar.slider("True Wind Angle (°)", min_value=30, max_value=180, value=45, step=1) 
+TWA = st.sidebar.slider("True Wind Angle (°)", min_value=30, max_value=180, value=45, step=1)
+
 st.sidebar.header("Trim Controls (manual test)")
 sheet = st.sidebar.slider("Sheet angle (°)", min_value=5.0, max_value=25.0, value=15.0, step=0.5)
-twist = st.sidebar.slider("Twist (° foot→head)", min_value=0.0, max_value=10.0, value=5.0, step=0.5)
+twist = st.sidebar.slider("Twist (° foot→head)", min_value=0.0, max_value=10.0, value=5.0, step=0.5)
 camber = st.sidebar.slider("Camber fraction", min_value=0.05, max_value=0.2, value=0.1, step=0.005)
 
 # Manual prediction
 st.subheader("Manual Trim Prediction")
 Vb, heel = boat_equilibrium(TWA, TWS, sheet, twist, camber)
 VMG = Vb * np.cos(np.radians(TWA))
-st.metric("Boat Speed", f"{Vb:.2f} m/s")
+st.metric("Boat Speed", f"{Vb:.2f} m/s")
 st.metric("Heel Angle", f"{heel:.1f}°")
-st.metric("VMG", f"{VMG:.2f} m/s")
+st.metric("VMG", f"{VMG:.2f} m/s")
 
 # Optimiser
 st.subheader("Automatic Optimisation (Max VMG)")
-if st.button("Run Optimiser"):
+if st.button("Run Optimiser"):
     s_opt, t_opt, c_opt, Vb_opt, heel_opt, VMG_opt = optimize_trim(TWA, TWS)
-    st.success(f"Optimal trim for {TWS:.1f} m/s @ {TWA}° TWA")
-    st.write(f"- Sheet = {s_opt:.1f}°")
-    st.write(f"- Twist = {t_opt:.1f}°")
-    st.write(f"- Camber = {c_opt:.3f}")
+    st.success(f"Optimal trim for {TWS:.1f} m/s @ {TWA}° TWA")
+    st.write(f"- Sheet = {s_opt:.1f}°")
+    st.write(f"- Twist = {t_opt:.1f}°")
+    st.write(f"- Camber = {c_opt:.3f}")
     st.write(f"Speed = {Vb_opt:.2f} m/s Heel = {heel_opt:.1f}° VMG = {VMG_opt:.2f} m/s")
 
 # Polar plot
@@ -144,4 +146,4 @@ if st.button("Create Polar Plot"):
     ax.set_theta_direction(-1)
     ax.set_title(f"IOM Polar – TWS {TWS:.1f} m/s")
     st.pyplot(fig)
-  
+
