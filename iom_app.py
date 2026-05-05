@@ -73,9 +73,10 @@ def boat_equilibrium(TWA, TWS, sheet, twist, camber):
         if abs(err) < 0.01:
             break
 
-    heel = np.degrees(np.arcsin(
-        min(1.0, M_heel / max(DISPLACEMENT * G * HEEL_STIFFNESS, 1e-6))
-    ))
+   ratio = M_heel / max(DISPLACEMENT * G * HEEL_STIFFNESS, 1e-6)
+ratio = max(-1.0, min(1.0, ratio))  # clamp between -1 and 1
+heel = np.degrees(np.arcsin(ratio))
+
     return max(Vb, 0), heel
 
 # ------------------------------------------------------------------
