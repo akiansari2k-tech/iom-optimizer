@@ -18,7 +18,7 @@ SAIL_AREA_JIB  = 0.10    # m²
 KEEL_AREA = 0.015        # m²
 KEEL_AR = 4.0
 HYDRO_EFF = 0.9
-HEEL_STIFFNESS = 0.05    # m per rad
+HEEL_STIFFNESS = 0.12    # m per rad
 
 # ------------------------------------------------------------------
 # BASIC MODELS
