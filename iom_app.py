@@ -31,7 +31,7 @@ def sail_forces(AWA, AWS, sheet, twist, camber, area):
     alpha = np.radians(AWA - sheet) - np.radians(twist_prof)
 
     # approximate 2D sail coefficients
-    CL = 1.2 * alpha * (1 - 4.0 * (camber - 0.1) ** 2)
+    CL = 1.15 * alpha * (1 - 4.0 * (camber - 0.1) ** 2)
     CD = 0.01 + 0.02 * CL ** 2
 
     q = 0.5 * RHO_AIR * AWS ** 2
