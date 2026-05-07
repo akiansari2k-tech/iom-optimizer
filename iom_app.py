@@ -31,7 +31,7 @@ def sail_forces(AWA, AWS, sheet, twist, camber, area):
     alpha = np.radians(AWA - sheet) - np.radians(twist_prof)
 
     # approximate 2D sail coefficients
-    CL = 1.3 * alpha * (1 - 4.0 * (camber - 0.1) ** 2)
+    CL = 1.2 * alpha * (1 - 4.0 * (camber - 0.1) ** 2)
     CD = 0.01 + 0.02 * CL ** 2
 
     q = 0.5 * RHO_AIR * AWS ** 2
@@ -48,7 +48,7 @@ def hydro_forces(Vb, F_side):
     """Simple hydrodynamic resistance + side‑force balance."""
     CL_h = F_side / max(0.5 * RHO_WATER * KEEL_AREA * Vb ** 2, 1e-6)
     CD_h = 0.01 + CL_h ** 2 / (np.pi * HYDRO_EFF * KEEL_AR)
-    R = 0.5 * RHO_WATER * CD_h * KEEL_AREA * Vb ** 2 + 0.40 * Vb ** 2
+    R = 0.5 * RHO_WATER * CD_h * KEEL_AREA * Vb ** 2 + 0.50 * Vb ** 2
     return R
 
 
