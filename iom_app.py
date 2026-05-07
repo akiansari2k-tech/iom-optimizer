@@ -83,7 +83,38 @@ def boat_equilibrium(TWA, TWS,
     heel = np.degrees(np.arcsin(ratio))
     return max(Vb, 0), heel
 
+
+
+## ------------------------------------------------------------------
+# AUTOMATIC TRIM OPTIMIZER
 # ------------------------------------------------------------------
+from scipy.optimize import differential_evolution
+
+def optimise_trim_for_vmg(TWA, TWS):
+    """Search parameter space for max VMG at given conditions."""
+
+    # bounds: (main_sheet, main_twist, main_camber, jib_sheet, jib_twist, jib_camber)
+    bounds = [
+        (5, 25), (0, 10), (0.05, 0.20),
+        (5, 25), (0, 10), (0.05, 0.20)
+    ]
+
+    def objective(x):
+        ms, mt, mc, js, jt, jc = x
+        Vb, _ = boat_equilibrium(TWA, TWS, ms, mt, mc, js, jt, jc)
+        VMG = Vb * np.cos(np.radians(TWA))
+        return -VMG
+
+    result = differential_evolution(objective, bounds, maxiter=60, popsize=10, tol=1e-3)
+    ms, mt, mc, js, jt, jc = result.x
+    Vb, heel = boat_equilibrium(TWA, TWS, ms, mt, mc, js, jt, jc)
+    VMG = Vb * np.cos(np.radians(TWA))
+    return {
+        "main_sheet": ms, "main_twist": mt, "main_camber": mc,
+        "jib_sheet": js,  "jib_twist": jt,  "jib_camber": jc,
+        "Vb": Vb, "heel": heel, "VMG": VMG
+    }
+    ------------------------------------------------------------------
 # STREAMLIT INTERFACE
 # ------------------------------------------------------------------
 st.set_page_config(page_title="IOM Upwind VMG Optimizer", layout="centered")
@@ -122,7 +153,25 @@ if TWA < 35:
     st.info("TWA below 35° = likely pinching; VMG decreases.")
 elif TWA > 50:
     st.info("TWA above 50° = sailing too free for best VMG upwind.")
+# ------------------------------------------------------------------
+# AUTOMATIC OPTIMISATION (find best VMG)
+# ------------------------------------------------------------------
+st.subheader("Automatic Optimisation")
+if st.button("Optimise Trim for Max VMG"):
+    with st.spinner("Computing... this may take 5‑10 seconds"):
+        opt = optimise_trim_for_vmg(TWA, TWS)
 
+    st.success(f"Best VMG for TWS {TWS:.1f} m/s at TWA {TWA}°")
+    st.write(f"Main Sheet = {opt['main_sheet']:.1f}°")
+    st.write(f"Main Twist = {opt['main_twist']:.1f}°")
+    st.write(f"Main Camber = {opt['main_camber']:.3f}")
+    st.write(f"Jib Sheet = {opt['jib_sheet']:.1f}°")
+    st.write(f"Jib Twist = {opt['jib_twist']:.1f}°")
+    st.write(f"Jib Camber = {opt['jib_camber']:.3f}")
+    st.metric("Optimised Boat Speed", f"{opt['Vb']:.2f} m/s")
+    st.metric("Heel Angle", f"{opt['heel']:.1f}°")
+    st.metric("VMG", f"{opt['VMG']:.2f} m/s")
+    
 # ------------------------------------------------------------------
 # POLAR PLOT
 # ------------------------------------------------------------------
