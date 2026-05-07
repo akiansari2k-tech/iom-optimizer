@@ -114,7 +114,7 @@ def optimise_trim_for_vmg(TWA, TWS):
         "jib_sheet": js,  "jib_twist": jt,  "jib_camber": jc,
         "Vb": Vb, "heel": heel, "VMG": VMG
     }
-    ------------------------------------------------------------------
+# ------------------------------------------------------------------
 # STREAMLIT INTERFACE
 # ------------------------------------------------------------------
 st.set_page_config(page_title="IOM Upwind VMG Optimizer", layout="centered")
