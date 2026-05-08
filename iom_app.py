@@ -109,30 +109,44 @@ def boat_equilibrium(TWA, TWS,
 # ------------------------------------------------------------------
 from scipy.optimize import differential_evolution
 
-def optimise_trim_for_vmg(TWA, TWS):
-    """Search parameter space for max VMG at given conditions."""
+def sail_forces(AWA, AWS, sheet, twist, camber, area):
+    """Lift/drag for a single sail with vertical wind shear."""
+    z = np.linspace(0.05, SAIL_HEIGHT, 8)             # avoid z=0 singularity
+    c = area / SAIL_HEIGHT * np.ones_like(z)
 
-    # bounds: (main_sheet, main_twist, main_camber, jib_sheet, jib_twist, jib_camber)
-    bounds = [
-        (5, 25), (0, 10), (0.05, 0.20),
-        (5, 25), (0, 10), (0.05, 0.20)
-    ]
+    # --- Wind shear (power-law boundary layer) ---
+    z_ref = 1.0                                        # reference height (m)
+    shear_exp = 1/7                                    # standard atmospheric exponent
+    V_profile = AWS * (z / z_ref) ** shear_exp         # AWS at each height
 
-    def objective(x):
-        ms, mt, mc, js, jt, jc = x
-        Vb, _ = boat_equilibrium(TWA, TWS, ms, mt, mc, js, jt, jc)
-        VMG = Vb * np.cos(np.radians(TWA))
-        return -VMG
+    # Apparent wind angle also shifts a little with height
+    # (higher wind => smaller boat-speed-induced AWA correction)
+    AWA_profile = AWA + 2.0 * (z / SAIL_HEIGHT)        # ~2° more open at head
 
-    result = differential_evolution(objective, bounds, maxiter=60, popsize=10, tol=1e-3)
-    ms, mt, mc, js, jt, jc = result.x
-    Vb, heel = boat_equilibrium(TWA, TWS, ms, mt, mc, js, jt, jc)
-    VMG = Vb * np.cos(np.radians(TWA))
-    return {
-        "main_sheet": ms, "main_twist": mt, "main_camber": mc,
-        "jib_sheet": js,  "jib_twist": jt,  "jib_camber": jc,
-        "Vb": Vb, "heel": heel, "VMG": VMG
-    }
+    # Twist opens the leech progressively from foot to head
+    twist_prof = twist * (z / SAIL_HEIGHT)
+
+    # Local angle of attack: ideally the twist matches the AWA shift
+    alpha = np.radians(AWA_profile - sheet - twist_prof)
+
+    # 2D coefficients
+    CL = 1.05 * alpha * (1 - 4.0 * (camber - 0.1) ** 2)
+
+    # Stall penalty: if local alpha is too high, lift collapses
+    stall = np.where(np.abs(alpha) > np.radians(18), 0.5, 1.0)
+    CL = CL * stall
+
+    CD = 0.01 + 0.02 * CL ** 2
+
+    q = 0.5 * RHO_AIR * V_profile ** 2
+    L = np.sum(q * CL * c * np.gradient(z))
+    D = np.sum(q * CD * c * np.gradient(z))
+
+    F_drive = L * np.sin(np.radians(AWA)) - D * np.cos(np.radians(AWA))
+    F_side  = L * np.cos(np.radians(AWA)) + D * np.sin(np.radians(AWA))
+    M_heel  = F_side * (SAIL_HEIGHT * 0.4)
+    return F_drive, F_side, M_heel
+    
 # ------------------------------------------------------------------
 # STREAMLIT INTERFACE
 # ------------------------------------------------------------------
