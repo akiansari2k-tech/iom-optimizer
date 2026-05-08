@@ -189,21 +189,23 @@ elif TWA > 50:
 # ------------------------------------------------------------------
 # AUTOMATIC OPTIMISATION (find best VMG)
 # ------------------------------------------------------------------
-st.subheader("Automatic Optimisation")
-if st.button("Optimise Trim for Max VMG"):
-    with st.spinner("Computing... this may take 5‑10 seconds"):
-        opt = optimise_trim_for_vmg(TWA, TWS)
+st.subheader("Automatic Optimisation (Best Upwind Angle + Trim)")
+if st.button("Optimise for Max VMG"):
+    with st.spinner("Searching best angle and trim... 10–20 seconds"):
+        opt = optimise_trim_for_vmg(TWS)
 
-    st.success(f"Best VMG for TWS {TWS:.1f} m/s at TWA {TWA}°")
-    st.write(f"Main Sheet = {opt['main_sheet']:.1f}°")
-    st.write(f"Main Twist = {opt['main_twist']:.1f}°")
-    st.write(f"Main Camber = {opt['main_camber']:.3f}")
-    st.write(f"Jib Sheet = {opt['jib_sheet']:.1f}°")
-    st.write(f"Jib Twist = {opt['jib_twist']:.1f}°")
-    st.write(f"Jib Camber = {opt['jib_camber']:.3f}")
-    st.metric("Optimised Boat Speed", f"{opt['Vb']:.2f} m/s")
+    st.success(f"Best upwind result for TWS {TWS:.1f} m/s")
+    st.write(f"**Optimum TWA = {opt['TWA']:.1f}°**")
+    st.write(f"Main Sheet = {opt['main_sheet']:.1f}°")
+    st.write(f"Main Twist = {opt['main_twist']:.1f}°")
+    st.write(f"Main Camber = {opt['main_camber']:.3f}")
+    st.write(f"Jib Sheet = {opt['jib_sheet']:.1f}°")
+    st.write(f"Jib Twist = {opt['jib_twist']:.1f}°")
+    st.write(f"Jib Camber = {opt['jib_camber']:.3f}")
+    st.metric("Boat Speed", f"{opt['Vb']:.2f} m/s")
     st.metric("Heel Angle", f"{opt['heel']:.1f}°")
-    st.metric("VMG", f"{opt['VMG']:.2f} m/s")
+    st.metric("VMG", f"{opt['VMG']:.2f} m/s")
+    
     
 # ------------------------------------------------------------------
 # POLAR PLOT
