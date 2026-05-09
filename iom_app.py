@@ -24,17 +24,35 @@ HEEL_STIFFNESS = 0.07    # m per rad
 # BASIC MODELS
 # ------------------------------------------------------------------
 def sail_forces(AWA, AWS, sheet, twist, camber, area):
-    """Lift/drag for a single sail surface."""
-    z = np.linspace(0, SAIL_HEIGHT, 8)
+    """Lift/drag for a single sail with vertical wind shear."""
+    z = np.linspace(0.05, SAIL_HEIGHT, 8)             # avoid z=0 singularity
     c = area / SAIL_HEIGHT * np.ones_like(z)
-    twist_prof = twist * (z / SAIL_HEIGHT)
-    alpha = np.radians(AWA - sheet) - np.radians(twist_prof)
 
-    # approximate 2D sail coefficients
+    # --- Wind shear (power-law boundary layer) ---
+    z_ref = 1.0                                        # reference height (m)
+    shear_exp = 1/7                                    # standard atmospheric exponent
+    V_profile = AWS * (z / z_ref) ** shear_exp         # AWS at each height
+
+    # Apparent wind angle also shifts a little with height
+    # (higher wind => smaller boat-speed-induced AWA correction)
+    AWA_profile = AWA + 2.0 * (z / SAIL_HEIGHT)        # ~2° more open at head
+
+    # Twist opens the leech progressively from foot to head
+    twist_prof = twist * (z / SAIL_HEIGHT)
+
+    # Local angle of attack: ideally the twist matches the AWA shift
+    alpha = np.radians(AWA_profile - sheet - twist_prof)
+
+    # 2D coefficients
     CL = 1.05 * alpha * (1 - 4.0 * (camber - 0.1) ** 2)
+
+    # Stall penalty: if local alpha is too high, lift collapses
+    stall = np.where(np.abs(alpha) > np.radians(18), 0.5, 1.0)
+    CL = CL * stall
+
     CD = 0.01 + 0.02 * CL ** 2
 
-    q = 0.5 * RHO_AIR * AWS ** 2
+    q = 0.5 * RHO_AIR * V_profile ** 2
     L = np.sum(q * CL * c * np.gradient(z))
     D = np.sum(q * CD * c * np.gradient(z))
 
@@ -42,6 +60,7 @@ def sail_forces(AWA, AWS, sheet, twist, camber, area):
     F_side  = L * np.cos(np.radians(AWA)) + D * np.sin(np.radians(AWA))
     M_heel  = F_side * (SAIL_HEIGHT * 0.4)
     return F_drive, F_side, M_heel
+    
 
 
 def hydro_forces(Vb, F_side):
