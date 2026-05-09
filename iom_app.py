@@ -109,30 +109,36 @@ def boat_equilibrium(TWA, TWS,
 # ------------------------------------------------------------------
 from scipy.optimize import differential_evolution
 
-def optimise_trim_for_vmg(TWA, TWS):
-    """Search parameter space for max VMG at given conditions."""
+def optimise_trim_for_vmg(TWS):
+    """Find the TWA + trim combination that maximises upwind VMG."""
 
-    # bounds: (main_sheet, main_twist, main_camber, jib_sheet, jib_twist, jib_camber)
+    # bounds: TWA, main_sheet, main_twist, main_camber,
+    #         jib_sheet, jib_twist, jib_camber
     bounds = [
+        (25, 60),                      # TWA: realistic close-hauled range
         (5, 25), (0, 10), (0.05, 0.20),
         (5, 25), (0, 10), (0.05, 0.20)
     ]
 
     def objective(x):
-        ms, mt, mc, js, jt, jc = x
-        Vb, _ = boat_equilibrium(TWA, TWS, ms, mt, mc, js, jt, jc)
-        VMG = Vb * np.cos(np.radians(TWA))
+        twa, ms, mt, mc, js, jt, jc = x
+        Vb, _ = boat_equilibrium(twa, TWS, ms, mt, mc, js, jt, jc)
+        VMG = Vb * np.cos(np.radians(twa))
         return -VMG
 
-    result = differential_evolution(objective, bounds, maxiter=60, popsize=10, tol=1e-3)
-    ms, mt, mc, js, jt, jc = result.x
-    Vb, heel = boat_equilibrium(TWA, TWS, ms, mt, mc, js, jt, jc)
-    VMG = Vb * np.cos(np.radians(TWA))
+    result = differential_evolution(objective, bounds,
+                                    maxiter=80, popsize=12, tol=1e-3)
+    twa, ms, mt, mc, js, jt, jc = result.x
+    Vb, heel = boat_equilibrium(twa, TWS, ms, mt, mc, js, jt, jc)
+    VMG = Vb * np.cos(np.radians(twa))
+
     return {
+        "TWA": twa,
         "main_sheet": ms, "main_twist": mt, "main_camber": mc,
         "jib_sheet": js,  "jib_twist": jt,  "jib_camber": jc,
         "Vb": Vb, "heel": heel, "VMG": VMG
     }
+    
 # ------------------------------------------------------------------
 # STREAMLIT INTERFACE
 # ------------------------------------------------------------------
