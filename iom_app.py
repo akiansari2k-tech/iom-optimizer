@@ -67,8 +67,6 @@ def sail_forces(AWA_deg, AWS_ref, sheet_deg, twist_deg, camber, area):
 
     # Smooth stall rolloff centred at ~16°
     alpha_deg = np.degrees(alpha)
-    stall_factor = 0.5 + 0.5 * (1.0 - np.tanh((np.abs(alpha_deg) - 16.0) / 3.0)) * 0.5 + 0.25
-    # Equivalent smoother form, clamp to [0.25, 1.0]:
     stall_factor = np.clip(
         1.0 - 0.5 * (1.0 + np.tanh((np.abs(alpha_deg) - 16.0) / 3.0)),
         0.25, 1.0
@@ -86,11 +84,12 @@ def sail_forces(AWA_deg, AWS_ref, sheet_deg, twist_deg, camber, area):
     dF_drive = q * chord * (CL * np.sin(awa_rad) - CD * np.cos(awa_rad))
     dF_side  = q * chord * (CL * np.cos(awa_rad) + CD * np.sin(awa_rad))
 
-    F_drive = np.trapz(dF_drive, z)
-    F_side  = np.trapz(dF_side,  z)
+    # FIXED: np.trapz -> np.trapezoid
+    F_drive = np.trapezoid(dF_drive, z)
+    F_side  = np.trapezoid(dF_side, z)
 
     # Heeling moment about waterline: integrate side force × height
-    M_heel = np.trapz(dF_side * z, z)
+    M_heel = np.trapezoid(dF_side * z, z)
 
     return F_drive, F_side, M_heel
 
@@ -129,24 +128,41 @@ def _net_force(Vb, TWA_deg, TWS,
                heel_deg):
     """Drive minus resistance at trial speed Vb (with heel feedback)."""
     twa_rad = np.radians(TWA_deg)
-    # Apparent wind from true wind triangle
-    awa_rad = np.arctan2(TWS * np.sin(twa_rad),
-                         TWS * np.cos(twa_rad) - Vb)
-    AWA_deg = np.degrees(awa_rad)
-    AWS = np.hypot(TWS * np.sin(twa_rad),
-                   TWS * np.cos(twa_rad) - Vb)
 
-    # Heel reduces effective driving force (cos(heel)) and side force generation
+    # Apparent wind from true wind triangle
+    awa_rad = np.arctan2(
+        TWS * np.sin(twa_rad),
+        TWS * np.cos(twa_rad) - Vb
+    )
+
+    AWA_deg = np.degrees(awa_rad)
+
+    AWS = np.hypot(
+        TWS * np.sin(twa_rad),
+        TWS * np.cos(twa_rad) - Vb
+    )
+
+    # Heel reduces effective driving force
     cos_heel = np.cos(np.radians(heel_deg))
 
-    Fm_d, Fm_s, Mm = sail_forces(AWA_deg,     AWS, main_sheet, main_twist, main_camber, SAIL_AREA_MAIN)
-    Fj_d, Fj_s, Mj = sail_forces(AWA_deg + 4, AWS, jib_sheet,  jib_twist,  jib_camber,  SAIL_AREA_JIB)
+    Fm_d, Fm_s, Mm = sail_forces(
+        AWA_deg, AWS,
+        main_sheet, main_twist, main_camber,
+        SAIL_AREA_MAIN
+    )
+
+    Fj_d, Fj_s, Mj = sail_forces(
+        AWA_deg + 4, AWS,
+        jib_sheet, jib_twist, jib_camber,
+        SAIL_AREA_JIB
+    )
 
     F_drive = (Fm_d + Fj_d) * cos_heel
     F_side  = (Fm_s + Fj_s) * cos_heel
     M_heel  = (Mm + Mj) * cos_heel
 
     R = hydro_resistance(Vb, F_side)
+
     return F_drive - R, F_side, M_heel
 
 
@@ -155,174 +171,55 @@ def boat_equilibrium(TWA_deg, TWS,
                      jib_sheet,  jib_twist,  jib_camber):
     """
     Solve for steady-state boat speed and heel.
-    Outer loop: heel (feeds back into drive force).
-    Inner loop: brentq on F_drive(Vb) - R(Vb) = 0.
     """
     heel_deg = 0.0
 
-    for _ in range(8):  # heel fixed-point iteration
+    for _ in range(8):
+
         def residual(Vb):
-            net, _, _ = _net_force(Vb, TWA_deg, TWS,
-                                   main_sheet, main_twist, main_camber,
-                                   jib_sheet,  jib_twist,  jib_camber,
-                                   heel_deg)
+            net, _, _ = _net_force(
+                Vb, TWA_deg, TWS,
+                main_sheet, main_twist, main_camber,
+                jib_sheet, jib_twist, jib_camber,
+                heel_deg
+            )
             return net
 
-        # Bracket the root
         try:
             r_lo = residual(0.05)
             r_hi = residual(6.0)
+
             if r_lo * r_hi > 0:
-                # No sign change → boat barely moving or model degenerate
                 Vb = 0.0
                 break
-            Vb = brentq(residual, 0.05, 6.0, xtol=1e-3, maxiter=50)
+
+            Vb = brentq(
+                residual,
+                0.05, 6.0,
+                xtol=1e-3,
+                maxiter=50
+            )
+
         except (ValueError, RuntimeError):
             Vb = 0.0
             break
 
-        # Recompute side force and heeling moment at this Vb
-        _, F_side, M_heel = _net_force(Vb, TWA_deg, TWS,
-                                       main_sheet, main_twist, main_camber,
-                                       jib_sheet,  jib_twist,  jib_camber,
-                                       heel_deg)
+        _, F_side, M_heel = _net_force(
+            Vb, TWA_deg, TWS,
+            main_sheet, main_twist, main_camber,
+            jib_sheet, jib_twist, jib_camber,
+            heel_deg
+        )
 
-        # Heel from M_heel = m * g * GM * sin(heel)  (small-angle proper form)
         ratio = M_heel / max(DISPLACEMENT * G * GM, 1e-6)
         ratio = np.clip(ratio, -0.999, 0.999)
+
         new_heel = np.degrees(np.arcsin(ratio))
 
         if abs(new_heel - heel_deg) < 0.2:
             heel_deg = new_heel
             break
-        heel_deg = 0.5 * heel_deg + 0.5 * new_heel  # damp
+
+        heel_deg = 0.5 * heel_deg + 0.5 * new_heel
 
     return max(Vb, 0.0), heel_deg
-
-
-# ------------------------------------------------------------------
-# OPTIMIZER
-# ------------------------------------------------------------------
-def optimise_trim_for_vmg(TWS):
-    """Find TWA + trim that maximises upwind VMG."""
-    bounds = [
-        (25, 60),                       # TWA
-        (5, 25), (0, 10), (0.05, 0.20), # main: sheet, twist, camber
-        (5, 25), (0, 10), (0.05, 0.20)  # jib:  sheet, twist, camber
-    ]
-
-    def objective(x):
-        twa, ms, mt, mc, js, jt, jc = x
-        Vb, _ = boat_equilibrium(twa, TWS, ms, mt, mc, js, jt, jc)
-        return -Vb * np.cos(np.radians(twa))
-
-    result = differential_evolution(
-        objective, bounds,
-        maxiter=40, popsize=10, tol=1e-3,
-        seed=0, polish=True, workers=1
-    )
-    twa, ms, mt, mc, js, jt, jc = result.x
-    Vb, heel = boat_equilibrium(twa, TWS, ms, mt, mc, js, jt, jc)
-    VMG = Vb * np.cos(np.radians(twa))
-
-    return {
-        "TWA": twa,
-        "main_sheet": ms, "main_twist": mt, "main_camber": mc,
-        "jib_sheet":  js, "jib_twist":  jt, "jib_camber":  jc,
-        "Vb": Vb, "heel": heel, "VMG": VMG
-    }
-
-
-# ------------------------------------------------------------------
-# STREAMLIT UI
-# ------------------------------------------------------------------
-st.set_page_config(page_title="IOM Upwind VMG Optimizer", layout="centered")
-st.title("⛵ IOM Sail Trim – Close-Hauled VMG Model")
-
-st.sidebar.header("Wind")
-TWS = st.sidebar.slider("True Wind Speed (m/s)", 1.0, 8.0, 4.0, 0.1)
-TWA = st.sidebar.slider("True Wind Angle (° from bow)", 25, 90, 40, 1)
-
-st.sidebar.header("Mainsail Trim")
-main_sheet  = st.sidebar.slider("Main Sheet Angle (°)", 5.0, 25.0, 15.0, 0.5)
-main_twist  = st.sidebar.slider("Main Twist (° foot→head)", 0.0, 10.0, 5.0, 0.5)
-main_camber = st.sidebar.slider("Main Camber fraction", 0.05, 0.20, 0.10, 0.005)
-
-st.sidebar.header("Jib Trim")
-jib_sheet  = st.sidebar.slider("Jib Sheet Angle (°)", 5.0, 25.0, 12.0, 0.5)
-jib_twist  = st.sidebar.slider("Jib Twist (° foot→head)", 0.0, 10.0, 4.0, 0.5)
-jib_camber = st.sidebar.slider("Jib Camber fraction", 0.05, 0.20, 0.10, 0.005)
-
-# ------------------------------------------------------------------
-# CURRENT-SETTING CALCULATION
-# ------------------------------------------------------------------
-Vb, heel = boat_equilibrium(TWA, TWS,
-                            main_sheet, main_twist, main_camber,
-                            jib_sheet,  jib_twist,  jib_camber)
-VMG = Vb * np.cos(np.radians(TWA))
-
-st.subheader("Upwind Performance Estimate")
-col1, col2, col3 = st.columns(3)
-col1.metric("Boat Speed", f"{Vb:.2f} m/s")
-col2.metric("Heel Angle", f"{heel:.1f}°")
-col3.metric(f"VMG @ TWA {TWA}°", f"{VMG:.2f} m/s")
-
-if TWA < 35:
-    st.info("TWA below 35° = likely pinching; VMG decreases.")
-elif TWA > 50:
-    st.info("TWA above 50° = sailing too free for best upwind VMG.")
-
-# ------------------------------------------------------------------
-# AUTOMATIC OPTIMISATION
-# ------------------------------------------------------------------
-st.subheader("Automatic Optimisation (Best Upwind Angle + Trim)")
-if st.button("Optimise for Max VMG"):
-    with st.spinner("Searching best angle and trim..."):
-        opt = optimise_trim_for_vmg(TWS)
-
-    st.success(f"Best upwind result for TWS {TWS:.1f} m/s")
-    st.write(f"**Optimum TWA = {opt['TWA']:.1f}°**")
-
-    cA, cB = st.columns(2)
-    with cA:
-        st.markdown("**Mainsail**")
-        st.write(f"Sheet:  {opt['main_sheet']:.1f}°")
-        st.write(f"Twist:  {opt['main_twist']:.1f}°")
-        st.write(f"Camber: {opt['main_camber']:.3f}")
-    with cB:
-        st.markdown("**Jib**")
-        st.write(f"Sheet:  {opt['jib_sheet']:.1f}°")
-        st.write(f"Twist:  {opt['jib_twist']:.1f}°")
-        st.write(f"Camber: {opt['jib_camber']:.3f}")
-
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Boat Speed", f"{opt['Vb']:.2f} m/s")
-    c2.metric("Heel Angle", f"{opt['heel']:.1f}°")
-    c3.metric("VMG",        f"{opt['VMG']:.2f} m/s")
-
-# ------------------------------------------------------------------
-# POLAR PLOT
-# ------------------------------------------------------------------
-if st.button("Generate Upwind Polar"):
-    angles = np.arange(25, 91, 2)
-    speeds, vmgs = [], []
-    for ang in angles:
-        Vb_a, _ = boat_equilibrium(ang, TWS,
-                                   main_sheet, main_twist, main_camber,
-                                   jib_sheet,  jib_twist,  jib_camber)
-        speeds.append(Vb_a)
-        vmgs.append(Vb_a * np.cos(np.radians(ang)))
-
-    fig, ax = plt.subplots(subplot_kw={'projection': 'polar'}, figsize=(5, 5))
-    ax.plot(np.radians(angles), speeds, color='navy', label='Boat speed')
-    ax.plot(np.radians(angles), vmgs,   color='crimson', label='VMG')
-    ax.set_theta_zero_location('N')
-    ax.set_theta_direction(-1)
-    ax.set_thetamin(0)
-    ax.set_thetamax(90)
-    ax.set_title(f"Upwind Polar – TWS {TWS:.1f} m/s")
-    ax.legend(loc='lower right', fontsize=8)
-    st.pyplot(fig)
-
-st.caption("Prototype model for IOM trim sensitivity – close-hauled VMG experiment.")
-        
