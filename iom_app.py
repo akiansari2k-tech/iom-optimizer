@@ -6,6 +6,10 @@ import numpy as np
 from scipy.optimize import brentq, differential_evolution
 import matplotlib.pyplot as plt
 
+# NumPy 2.0 renamed trapz → trapezoid; keep backward compatibility
+if not hasattr(np, "trapezoid"):
+    np.trapezoid = np.trapz
+
 # ------------------------------------------------------------------
 # CONSTANTS (simplified IOM-scale model)
 # ------------------------------------------------------------------
@@ -65,10 +69,8 @@ def sail_forces(AWA_deg, AWS_ref, sheet_deg, twist_deg, camber, area):
     # Thin-airfoil CL with camber offset (camber raises zero-alpha lift)
     CL_inviscid = 2.0 * np.pi * (alpha + 2.0 * camber)
 
-    # Smooth stall rolloff centred at ~16°
+    # Smooth stall rolloff centred at ~16°, clamped to [0.25, 1.0]
     alpha_deg = np.degrees(alpha)
-    stall_factor = 0.5 + 0.5 * (1.0 - np.tanh((np.abs(alpha_deg) - 16.0) / 3.0)) * 0.5 + 0.25
-    # Equivalent smoother form, clamp to [0.25, 1.0]:
     stall_factor = np.clip(
         1.0 - 0.5 * (1.0 + np.tanh((np.abs(alpha_deg) - 16.0) / 3.0)),
         0.25, 1.0
@@ -86,11 +88,11 @@ def sail_forces(AWA_deg, AWS_ref, sheet_deg, twist_deg, camber, area):
     dF_drive = q * chord * (CL * np.sin(awa_rad) - CD * np.cos(awa_rad))
     dF_side  = q * chord * (CL * np.cos(awa_rad) + CD * np.sin(awa_rad))
 
-    F_drive = np.trapz(dF_drive, z)
-    F_side  = np.trapz(dF_side,  z)
+    F_drive = np.trapezoid(dF_drive, z)
+    F_side  = np.trapezoid(dF_side,  z)
 
     # Heeling moment about waterline: integrate side force × height
-    M_heel = np.trapz(dF_side * z, z)
+    M_heel = np.trapezoid(dF_side * z, z)
 
     return F_drive, F_side, M_heel
 
@@ -159,10 +161,11 @@ def boat_equilibrium(TWA_deg, TWS,
     Inner loop: brentq on F_drive(Vb) - R(Vb) = 0.
     """
     heel_deg = 0.0
+    Vb = 0.0
 
     for _ in range(8):  # heel fixed-point iteration
-        def residual(Vb):
-            net, _, _ = _net_force(Vb, TWA_deg, TWS,
+        def residual(Vb_trial):
+            net, _, _ = _net_force(Vb_trial, TWA_deg, TWS,
                                    main_sheet, main_twist, main_camber,
                                    jib_sheet,  jib_twist,  jib_camber,
                                    heel_deg)
@@ -187,7 +190,7 @@ def boat_equilibrium(TWA_deg, TWS,
                                        jib_sheet,  jib_twist,  jib_camber,
                                        heel_deg)
 
-        # Heel from M_heel = m * g * GM * sin(heel)  (small-angle proper form)
+        # Heel from M_heel = m * g * GM * sin(heel)
         ratio = M_heel / max(DISPLACEMENT * G * GM, 1e-6)
         ratio = np.clip(ratio, -0.999, 0.999)
         new_heel = np.degrees(np.arcsin(ratio))
@@ -325,4 +328,3 @@ if st.button("Generate Upwind Polar"):
     st.pyplot(fig)
 
 st.caption("Prototype model for IOM trim sensitivity – close-hauled VMG experiment.")
-        
