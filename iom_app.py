@@ -46,55 +46,44 @@ SHEAR_EXP       = 1.0 / 7.0
 def sail_forces(AWA_deg, AWS_ref, sheet_deg, twist_deg, camber, area):
     """
     Compute drive force, side force, and heeling moment for one sail.
-
-    Integrates over height with wind shear, projecting lift/drag at each
-    height onto the boat's body axes using the LOCAL apparent wind angle.
     """
     n = 12
     z = np.linspace(0.05, SAIL_HEIGHT, n)
     chord = (area / SAIL_HEIGHT) * np.ones_like(z)
 
-    # Wind shear: AWS grows with height
     V_local = AWS_ref * (z / Z_REF) ** SHEAR_EXP
-
-    # AWA opens slightly with height (boat-speed component shrinks aloft)
     AWA_local_deg = AWA_deg + 2.0 * (z / SAIL_HEIGHT)
-
-    # Twist progressively eases the leech from foot to head
     twist_local_deg = twist_deg * (z / SAIL_HEIGHT)
 
-    # Local angle of attack (radians)
     alpha = np.radians(AWA_local_deg - sheet_deg - twist_local_deg)
-
-    # Thin-airfoil CL with camber offset (camber raises zero-alpha lift)
     CL_inviscid = 2.0 * np.pi * (alpha + 2.0 * camber)
 
-    # Smooth stall rolloff centred at ~16°, clamped to [0.25, 1.0]
+    # Smoother, later stall — IOM sails tolerate higher α than thin foils
     alpha_deg = np.degrees(alpha)
     stall_factor = np.clip(
-        1.0 - 0.5 * (1.0 + np.tanh((np.abs(alpha_deg) - 16.0) / 3.0)),
+        1.0 - 0.5 * (1.0 + np.tanh((np.abs(alpha_deg) - 22.0) / 4.0)),
         0.25, 1.0
     )
     CL = CL_inviscid * stall_factor
 
-    # Drag: profile + induced (induced uses sail aspect ratio)
     AR_sail = SAIL_HEIGHT ** 2 / area
-    CD = 0.015 + CL ** 2 / (np.pi * 0.85 * AR_sail)
+    CD = 0.02 + CL ** 2 / (np.pi * 0.85 * AR_sail)
 
     q = 0.5 * RHO_AIR * V_local ** 2
 
-    # Project locally: lift ⟂ to apparent wind, drag ∥ to it
     awa_rad = np.radians(AWA_local_deg)
     dF_drive = q * chord * (CL * np.sin(awa_rad) - CD * np.cos(awa_rad))
     dF_side  = q * chord * (CL * np.cos(awa_rad) + CD * np.sin(awa_rad))
 
     F_drive = np.trapezoid(dF_drive, z)
     F_side  = np.trapezoid(dF_side,  z)
-
-    # Heeling moment about waterline: integrate side force × height
-    M_heel = np.trapezoid(dF_side * z, z)
+    M_heel  = np.trapezoid(dF_side * z, z)
 
     return F_drive, F_side, M_heel
+
+
+
+                         
 
 
 # ------------------------------------------------------------------
@@ -150,57 +139,6 @@ def _net_force(Vb, TWA_deg, TWS,
 
     R = hydro_resistance(Vb, F_side)
     return F_drive - R, F_side, M_heel
-
-
-def boat_equilibrium(TWA_deg, TWS,
-                     main_sheet, main_twist, main_camber,
-                     jib_sheet,  jib_twist,  jib_camber):
-    """
-    Solve for steady-state boat speed and heel.
-    Outer loop: heel (feeds back into drive force).
-    Inner loop: brentq on F_drive(Vb) - R(Vb) = 0.
-    """
-    heel_deg = 0.0
-    Vb = 0.0
-
-    for _ in range(8):  # heel fixed-point iteration
-        def residual(Vb_trial):
-            net, _, _ = _net_force(Vb_trial, TWA_deg, TWS,
-                                   main_sheet, main_twist, main_camber,
-                                   jib_sheet,  jib_twist,  jib_camber,
-                                   heel_deg)
-            return net
-
-        # Bracket the root
-        try:
-            r_lo = residual(0.05)
-            r_hi = residual(6.0)
-            if r_lo * r_hi > 0:
-                # No sign change → boat barely moving or model degenerate
-                Vb = 0.0
-                break
-            Vb = brentq(residual, 0.05, 6.0, xtol=1e-3, maxiter=50)
-        except (ValueError, RuntimeError):
-            Vb = 0.0
-            break
-
-        # Recompute side force and heeling moment at this Vb
-        _, F_side, M_heel = _net_force(Vb, TWA_deg, TWS,
-                                       main_sheet, main_twist, main_camber,
-                                       jib_sheet,  jib_twist,  jib_camber,
-                                       heel_deg)
-
-        # Heel from M_heel = m * g * GM * sin(heel)
-        ratio = M_heel / max(DISPLACEMENT * G * GM, 1e-6)
-        ratio = np.clip(ratio, -0.999, 0.999)
-        new_heel = np.degrees(np.arcsin(ratio))
-
-        if abs(new_heel - heel_deg) < 0.2:
-            heel_deg = new_heel
-            break
-        heel_deg = 0.5 * heel_deg + 0.5 * new_heel  # damp
-
-    return max(Vb, 0.0), heel_deg
 
 
 # ------------------------------------------------------------------
