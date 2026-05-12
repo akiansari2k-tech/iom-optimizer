@@ -141,6 +141,57 @@ def _net_force(Vb, TWA_deg, TWS,
     return F_drive - R, F_side, M_heel
 
 
+def boat_equilibrium(TWA_deg, TWS,
+                     main_sheet, main_twist, main_camber,
+                     jib_sheet,  jib_twist,  jib_camber):
+    """
+    Solve for steady-state boat speed and heel.
+    """
+    heel_deg = 0.0
+    Vb = 0.0
+
+    for _ in range(8):
+        def residual(Vb_trial):
+            net, _, _ = _net_force(Vb_trial, TWA_deg, TWS,
+                                   main_sheet, main_twist, main_camber,
+                                   jib_sheet,  jib_twist,  jib_camber,
+                                   heel_deg)
+            return net
+
+        # Try progressively wider brackets
+        Vb_new = 0.0
+        for lo, hi in [(0.01, 3.0), (0.01, 5.0), (0.001, 8.0)]:
+            try:
+                r_lo = residual(lo)
+                r_hi = residual(hi)
+                if r_lo * r_hi < 0:
+                    Vb_new = brentq(residual, lo, hi, xtol=1e-3, maxiter=50)
+                    break
+            except (ValueError, RuntimeError):
+                continue
+
+        Vb = Vb_new
+        if Vb <= 0:
+            break
+
+        _, F_side, M_heel = _net_force(Vb, TWA_deg, TWS,
+                                       main_sheet, main_twist, main_camber,
+                                       jib_sheet,  jib_twist,  jib_camber,
+                                       heel_deg)
+
+        ratio = M_heel / max(DISPLACEMENT * G * GM, 1e-6)
+        ratio = np.clip(ratio, -0.999, 0.999)
+        new_heel = np.degrees(np.arcsin(ratio))
+
+        if abs(new_heel - heel_deg) < 0.2:
+            heel_deg = new_heel
+            break
+        heel_deg = 0.5 * heel_deg + 0.5 * new_heel
+
+    return max(Vb, 0.0), heel_deg
+                         
+                         
+
 # ------------------------------------------------------------------
 # OPTIMIZER
 # ------------------------------------------------------------------
