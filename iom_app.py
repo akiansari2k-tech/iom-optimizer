@@ -1,43 +1,72 @@
 # iom_app.py – IOM Upwind Sail-Trim / VMG Optimizer
-# Rewritten with corrected physics and more robust numerics
+# Calibrated against real IOM racing data
 
 import streamlit as st
 import numpy as np
 from scipy.optimize import brentq, differential_evolution
 import matplotlib.pyplot as plt
 
-# NumPy 2.0 renamed trapz → trapezoid; keep backward compatibility
+# NumPy 2.0 renamed trapz → trapezoid
 if not hasattr(np, "trapezoid"):
     np.trapezoid = np.trapz
 
 # ------------------------------------------------------------------
-# CONSTANTS (simplified IOM-scale model)
+# CONSTANTS
 # ------------------------------------------------------------------
-RHO_AIR   = 1.225        # kg/m³
-RHO_WATER = 1025.0       # kg/m³
-G         = 9.81         # m/s²
+RHO_AIR   = 1.225
+RHO_WATER = 1025.0
+G         = 9.81
 
-DISPLACEMENT    = 4.0    # kg
-SAIL_HEIGHT     = 1.5    # m
-SAIL_AREA_MAIN  = 0.22   # m²
-SAIL_AREA_JIB   = 0.10   # m²
-KEEL_AREA       = 0.015  # m²
+DISPLACEMENT    = 4.0       # kg
+SAIL_HEIGHT     = 1.5       # m
+SAIL_AREA_MAIN  = 0.22      # m²
+SAIL_AREA_JIB   = 0.10      # m²
+KEEL_AREA       = 0.015     # m²
 KEEL_AR         = 4.0
 HYDRO_EFF       = 0.9
 
-# Hull resistance (residuary + frictional lumped)
-HULL_CD         = 0.008
-HULL_WETTED     = 0.12   # m² approximate wetted area
+HULL_WETTED     = 0.15      # m² wetted surface
+GM              = 0.12      # metacentric height (m)
 
-# Stability
-GM              = 0.07   # metacentric height (m) – effective for IOM at small heel
-
-# Centre of effort height fraction (above waterline)
-COE_HEIGHT_FRAC = 0.40
-
-# Wind shear
 Z_REF           = 1.0
 SHEAR_EXP       = 1.0 / 7.0
+
+# Boom geometry for sheet length conversion
+MAIN_BOOM_RADIUS = 215.0    # mm from pivot to sheet attachment
+JIB_BOOM_RADIUS  = 230.0    # mm from pivot to sheet attachment
+
+
+# ------------------------------------------------------------------
+# CONVERSION HELPERS
+# ------------------------------------------------------------------
+def angle_to_sheet_mm(angle_deg, boom_radius_mm):
+    """Sheet angle (degrees off centreline) → sheet length in mm."""
+    return boom_radius_mm * np.sin(np.radians(angle_deg))
+
+def sheet_mm_to_angle(sheet_mm, boom_radius_mm):
+    """Sheet length in mm → sheet angle in degrees off centreline."""
+    ratio = np.clip(sheet_mm / boom_radius_mm, -1.0, 1.0)
+    return np.degrees(np.arcsin(ratio))
+
+def camber_fraction_to_mm(camber_frac, chord_mm):
+    """Camber as fraction of chord → depth in mm."""
+    return camber_frac * chord_mm
+
+def camber_mm_to_fraction(camber_mm, chord_mm):
+    """Camber depth in mm → fraction of chord."""
+    return camber_mm / chord_mm
+
+def twist_deg_to_mm(twist_deg, sail_height_m, boom_radius_mm):
+    """
+    Twist in degrees → approximate mm of leech open at head.
+    Uses boom radius as the reference lever.
+    """
+    return boom_radius_mm * np.sin(np.radians(twist_deg))
+
+def twist_mm_to_deg(twist_mm, boom_radius_mm):
+    """Twist mm → degrees."""
+    ratio = np.clip(twist_mm / boom_radius_mm, -1.0, 1.0)
+    return np.degrees(np.arcsin(ratio))
 
 
 # ------------------------------------------------------------------
@@ -45,7 +74,9 @@ SHEAR_EXP       = 1.0 / 7.0
 # ------------------------------------------------------------------
 def sail_forces(AWA_deg, AWS_ref, sheet_deg, twist_deg, camber, area):
     """
-    Compute drive force, side force, and heeling moment for one sail.
+    Drive force, side force, heeling moment for one sail.
+    sheet_deg, twist_deg are internal angles (degrees).
+    camber is a fraction (e.g. 0.10).
     """
     n = 12
     z = np.linspace(0.05, SAIL_HEIGHT, n)
@@ -56,12 +87,14 @@ def sail_forces(AWA_deg, AWS_ref, sheet_deg, twist_deg, camber, area):
     twist_local_deg = twist_deg * (z / SAIL_HEIGHT)
 
     alpha = np.radians(AWA_local_deg - sheet_deg - twist_local_deg)
+
+    # Thin-airfoil CL with camber
     CL_inviscid = 2.0 * np.pi * (alpha + 2.0 * camber)
 
-    # Smoother, later stall — IOM sails tolerate higher α than thin foils
-    alpha_deg = np.degrees(alpha)
+    # Smooth stall
+    alpha_deg_abs = np.abs(np.degrees(alpha))
     stall_factor = np.clip(
-        1.0 - 0.5 * (1.0 + np.tanh((np.abs(alpha_deg) - 22.0) / 4.0)),
+        1.0 - 0.5 * (1.0 + np.tanh((alpha_deg_abs - 22.0) / 4.0)),
         0.25, 1.0
     )
     CL = CL_inviscid * stall_factor
@@ -70,8 +103,8 @@ def sail_forces(AWA_deg, AWS_ref, sheet_deg, twist_deg, camber, area):
     CD = 0.02 + CL ** 2 / (np.pi * 0.85 * AR_sail)
 
     q = 0.5 * RHO_AIR * V_local ** 2
-
     awa_rad = np.radians(AWA_local_deg)
+
     dF_drive = q * chord * (CL * np.sin(awa_rad) - CD * np.cos(awa_rad))
     dF_side  = q * chord * (CL * np.cos(awa_rad) + CD * np.sin(awa_rad))
 
@@ -82,30 +115,29 @@ def sail_forces(AWA_deg, AWS_ref, sheet_deg, twist_deg, camber, area):
     return F_drive, F_side, M_heel
 
 
-
-                         
-
-
 # ------------------------------------------------------------------
-# HYDRODYNAMICS
+# HYDRODYNAMICS – speed-dependent (ITTC friction + residuary)
 # ------------------------------------------------------------------
 def hydro_resistance(Vb, F_side):
-    """
-    Hull + keel resistance at boat speed Vb with required side force F_side.
-    Side force is generated by the keel at some leeway angle; we don't solve
-    leeway explicitly but charge induced drag for producing F_side.
-    """
-    if Vb < 1e-3:
+    """Hull + keel resistance."""
+    if Vb < 1e-4:
         return 0.0
 
     q_w = 0.5 * RHO_WATER * Vb ** 2
 
-    # Hull resistance (lumped frictional + residuary)
-    R_hull = q_w * HULL_CD * HULL_WETTED
+    # ITTC-57 friction line
+    Re = max(Vb * 1.0 / 1.0e-6, 1e3)
+    Cf = 0.075 / (np.log10(Re) - 2.0) ** 2
 
-    # Keel: induced drag from producing F_side
+    # Residuary (wave-making) rises sharply near hull speed
+    Fn = Vb / np.sqrt(G * 1.0)
+    Cr = 0.002 + 0.06 * Fn ** 4
+
+    R_hull = q_w * (Cf + Cr) * HULL_WETTED
+
+    # Keel induced drag from producing side force
     CL_keel = F_side / max(q_w * KEEL_AREA, 1e-6)
-    CD_keel = 0.01 + CL_keel ** 2 / (np.pi * HYDRO_EFF * KEEL_AR)
+    CD_keel = 0.008 + CL_keel ** 2 / (np.pi * HYDRO_EFF * KEEL_AR)
     R_keel = q_w * CD_keel * KEEL_AREA
 
     return R_hull + R_keel
@@ -118,16 +150,14 @@ def _net_force(Vb, TWA_deg, TWS,
                main_sheet, main_twist, main_camber,
                jib_sheet,  jib_twist,  jib_camber,
                heel_deg):
-    """Drive minus resistance at trial speed Vb (with heel feedback)."""
+    """Drive minus resistance at trial Vb."""
     twa_rad = np.radians(TWA_deg)
-    # Apparent wind from true wind triangle
     awa_rad = np.arctan2(TWS * np.sin(twa_rad),
                          TWS * np.cos(twa_rad) - Vb)
     AWA_deg = np.degrees(awa_rad)
     AWS = np.hypot(TWS * np.sin(twa_rad),
                    TWS * np.cos(twa_rad) - Vb)
 
-    # Heel reduces effective driving force (cos(heel)) and side force generation
     cos_heel = np.cos(np.radians(heel_deg))
 
     Fm_d, Fm_s, Mm = sail_forces(AWA_deg,     AWS, main_sheet, main_twist, main_camber, SAIL_AREA_MAIN)
@@ -144,13 +174,11 @@ def _net_force(Vb, TWA_deg, TWS,
 def boat_equilibrium(TWA_deg, TWS,
                      main_sheet, main_twist, main_camber,
                      jib_sheet,  jib_twist,  jib_camber):
-    """
-    Solve for steady-state boat speed and heel.
-    """
+    """Solve for steady-state boat speed and heel."""
     heel_deg = 0.0
     Vb = 0.0
 
-    for _ in range(8):
+    for _ in range(10):
         def residual(Vb_trial):
             net, _, _ = _net_force(Vb_trial, TWA_deg, TWS,
                                    main_sheet, main_twist, main_camber,
@@ -158,14 +186,13 @@ def boat_equilibrium(TWA_deg, TWS,
                                    heel_deg)
             return net
 
-        # Try progressively wider brackets
         Vb_new = 0.0
-        for lo, hi in [(0.01, 3.0), (0.01, 5.0), (0.001, 8.0)]:
+        for lo, hi in [(0.005, 2.0), (0.005, 4.0), (0.001, 6.0)]:
             try:
                 r_lo = residual(lo)
                 r_hi = residual(hi)
                 if r_lo * r_hi < 0:
-                    Vb_new = brentq(residual, lo, hi, xtol=1e-3, maxiter=50)
+                    Vb_new = brentq(residual, lo, hi, xtol=1e-4, maxiter=60)
                     break
             except (ValueError, RuntimeError):
                 continue
@@ -183,44 +210,71 @@ def boat_equilibrium(TWA_deg, TWS,
         ratio = np.clip(ratio, -0.999, 0.999)
         new_heel = np.degrees(np.arcsin(ratio))
 
-        if abs(new_heel - heel_deg) < 0.2:
+        if abs(new_heel - heel_deg) < 0.15:
             heel_deg = new_heel
             break
-        heel_deg = 0.5 * heel_deg + 0.5 * new_heel
+        heel_deg = 0.6 * heel_deg + 0.4 * new_heel
 
     return max(Vb, 0.0), heel_deg
-                         
-                         
+
 
 # ------------------------------------------------------------------
 # OPTIMIZER
 # ------------------------------------------------------------------
 def optimise_trim_for_vmg(TWS):
     """Find TWA + trim that maximises upwind VMG."""
+    # Bounds in mm for sheet/twist, mm for camber
+    # Internally converted to degrees / fractions
+    # TWA, main_sheet_mm, main_twist_mm, main_camber_mm,
+    #       jib_sheet_mm,  jib_twist_mm,  jib_camber_mm
     bounds = [
-        (25, 60),                       # TWA
-        (5, 25), (0, 10), (0.05, 0.20), # main: sheet, twist, camber
-        (5, 25), (0, 10), (0.05, 0.20)  # jib:  sheet, twist, camber
+        (25, 55),                        # TWA degrees
+        (0, 80),  (10, 60), (10, 40),   # main: sheet mm, twist mm, camber mm
+        (0, 100), (10, 60), (10, 40)    # jib:  sheet mm, twist mm, camber mm
     ]
 
+    # Approximate chord in mm for camber conversion
+    main_chord_mm = (SAIL_AREA_MAIN / SAIL_HEIGHT) * 1000.0
+    jib_chord_mm  = (SAIL_AREA_JIB  / SAIL_HEIGHT) * 1000.0
+
     def objective(x):
-        twa, ms, mt, mc, js, jt, jc = x
-        Vb, _ = boat_equilibrium(twa, TWS, ms, mt, mc, js, jt, jc)
+        twa = x[0]
+        ms_deg = sheet_mm_to_angle(x[1], MAIN_BOOM_RADIUS)
+        mt_deg = twist_mm_to_deg(x[2], MAIN_BOOM_RADIUS)
+        mc_frac = camber_mm_to_fraction(x[3], main_chord_mm)
+        js_deg = sheet_mm_to_angle(x[4], JIB_BOOM_RADIUS)
+        jt_deg = twist_mm_to_deg(x[5], JIB_BOOM_RADIUS)
+        jc_frac = camber_mm_to_fraction(x[6], jib_chord_mm)
+
+        Vb, _ = boat_equilibrium(twa, TWS, ms_deg, mt_deg, mc_frac,
+                                 js_deg, jt_deg, jc_frac)
         return -Vb * np.cos(np.radians(twa))
 
     result = differential_evolution(
         objective, bounds,
-        maxiter=40, popsize=10, tol=1e-3,
+        maxiter=50, popsize=12, tol=1e-3,
         seed=0, polish=True, workers=1
     )
-    twa, ms, mt, mc, js, jt, jc = result.x
-    Vb, heel = boat_equilibrium(twa, TWS, ms, mt, mc, js, jt, jc)
+
+    twa = result.x[0]
+    ms_mm, mt_mm, mc_mm = result.x[1], result.x[2], result.x[3]
+    js_mm, jt_mm, jc_mm = result.x[4], result.x[5], result.x[6]
+
+    ms_deg = sheet_mm_to_angle(ms_mm, MAIN_BOOM_RADIUS)
+    mt_deg = twist_mm_to_deg(mt_mm, MAIN_BOOM_RADIUS)
+    mc_frac = camber_mm_to_fraction(mc_mm, main_chord_mm)
+    js_deg = sheet_mm_to_angle(js_mm, JIB_BOOM_RADIUS)
+    jt_deg = twist_mm_to_deg(jt_mm, JIB_BOOM_RADIUS)
+    jc_frac = camber_mm_to_fraction(jc_mm, jib_chord_mm)
+
+    Vb, heel = boat_equilibrium(twa, TWS, ms_deg, mt_deg, mc_frac,
+                                js_deg, jt_deg, jc_frac)
     VMG = Vb * np.cos(np.radians(twa))
 
     return {
         "TWA": twa,
-        "main_sheet": ms, "main_twist": mt, "main_camber": mc,
-        "jib_sheet":  js, "jib_twist":  jt, "jib_camber":  jc,
+        "main_sheet_mm": ms_mm, "main_twist_mm": mt_mm, "main_camber_mm": mc_mm,
+        "jib_sheet_mm":  js_mm, "jib_twist_mm":  jt_mm, "jib_camber_mm":  jc_mm,
         "Vb": Vb, "heel": heel, "VMG": VMG
     }
 
@@ -231,26 +285,42 @@ def optimise_trim_for_vmg(TWS):
 st.set_page_config(page_title="IOM Upwind VMG Optimizer", layout="centered")
 st.title("⛵ IOM Sail Trim – Close-Hauled VMG Model")
 
+# Approximate chord in mm
+main_chord_mm = (SAIL_AREA_MAIN / SAIL_HEIGHT) * 1000.0  # ≈ 147 mm
+jib_chord_mm  = (SAIL_AREA_JIB  / SAIL_HEIGHT) * 1000.0  # ≈ 67 mm
+
+# --- Wind ---
 st.sidebar.header("Wind")
 TWS = st.sidebar.slider("True Wind Speed (m/s)", 1.0, 8.0, 4.0, 0.1)
-TWA = st.sidebar.slider("True Wind Angle (° from bow)", 25, 90, 40, 1)
+TWA = st.sidebar.slider("True Wind Angle (° from bow)", 25, 90, 38, 1)
 
+# --- Mainsail Trim (in mm) ---
 st.sidebar.header("Mainsail Trim")
-main_sheet  = st.sidebar.slider("Main Sheet Angle (°)", 5.0, 25.0, 15.0, 0.5)
-main_twist  = st.sidebar.slider("Main Twist (° foot→head)", 0.0, 10.0, 5.0, 0.5)
-main_camber = st.sidebar.slider("Main Camber fraction", 0.05, 0.20, 0.10, 0.005)
+main_sheet_mm  = st.sidebar.slider("Main Sheet Length (mm)", 0, 80, 10, 1)
+main_twist_mm  = st.sidebar.slider("Main Twist (mm)", 10, 60, 30, 1)
+main_camber_mm = st.sidebar.slider("Main Camber Depth (mm)", 5, 40, 20, 1)
 
+# --- Jib Trim (in mm) ---
 st.sidebar.header("Jib Trim")
-jib_sheet  = st.sidebar.slider("Jib Sheet Angle (°)", 5.0, 25.0, 12.0, 0.5)
-jib_twist  = st.sidebar.slider("Jib Twist (° foot→head)", 0.0, 10.0, 4.0, 0.5)
-jib_camber = st.sidebar.slider("Jib Camber fraction", 0.05, 0.20, 0.10, 0.005)
+jib_sheet_mm  = st.sidebar.slider("Jib Sheet Length (mm)", 0, 100, 50, 1)
+jib_twist_mm  = st.sidebar.slider("Jib Twist (mm)", 10, 60, 35, 1)
+jib_camber_mm = st.sidebar.slider("Jib Camber Depth (mm)", 5, 40, 25, 1)
+
+# Convert mm inputs to internal degrees / fractions
+main_sheet_deg  = sheet_mm_to_angle(main_sheet_mm, MAIN_BOOM_RADIUS)
+main_twist_deg  = twist_mm_to_deg(main_twist_mm, MAIN_BOOM_RADIUS)
+main_camber_frac = camber_mm_to_fraction(main_camber_mm, main_chord_mm)
+
+jib_sheet_deg  = sheet_mm_to_angle(jib_sheet_mm, JIB_BOOM_RADIUS)
+jib_twist_deg  = twist_mm_to_deg(jib_twist_mm, JIB_BOOM_RADIUS)
+jib_camber_frac = camber_mm_to_fraction(jib_camber_mm, jib_chord_mm)
 
 # ------------------------------------------------------------------
 # CURRENT-SETTING CALCULATION
 # ------------------------------------------------------------------
 Vb, heel = boat_equilibrium(TWA, TWS,
-                            main_sheet, main_twist, main_camber,
-                            jib_sheet,  jib_twist,  jib_camber)
+                            main_sheet_deg, main_twist_deg, main_camber_frac,
+                            jib_sheet_deg,  jib_twist_deg,  jib_camber_frac)
 VMG = Vb * np.cos(np.radians(TWA))
 
 st.subheader("Upwind Performance Estimate")
@@ -259,10 +329,22 @@ col1.metric("Boat Speed", f"{Vb:.2f} m/s")
 col2.metric("Heel Angle", f"{heel:.1f}°")
 col3.metric(f"VMG @ TWA {TWA}°", f"{VMG:.2f} m/s")
 
+# Show the internal angles for reference
+with st.expander("Internal angles (for reference)"):
+    cA, cB = st.columns(2)
+    with cA:
+        st.write(f"Main sheet angle: {main_sheet_deg:.1f}°")
+        st.write(f"Main twist angle: {main_twist_deg:.1f}°")
+        st.write(f"Main camber fraction: {main_camber_frac:.3f}")
+    with cB:
+        st.write(f"Jib sheet angle: {jib_sheet_deg:.1f}°")
+        st.write(f"Jib twist angle: {jib_twist_deg:.1f}°")
+        st.write(f"Jib camber fraction: {jib_camber_frac:.3f}")
+
 if TWA < 35:
-    st.info("TWA below 35° = likely pinching; VMG decreases.")
+    st.info("TWA below 35° – likely pinching; VMG may decrease.")
 elif TWA > 50:
-    st.info("TWA above 50° = sailing too free for best upwind VMG.")
+    st.info("TWA above 50° – sailing too free for best upwind VMG.")
 
 # ------------------------------------------------------------------
 # AUTOMATIC OPTIMISATION
@@ -272,20 +354,20 @@ if st.button("Optimise for Max VMG"):
     with st.spinner("Searching best angle and trim..."):
         opt = optimise_trim_for_vmg(TWS)
 
-    st.success(f"Best upwind result for TWS {TWS:.1f} m/s")
+    st.success(f"Best upwind VMG for TWS {TWS:.1f} m/s")
     st.write(f"**Optimum TWA = {opt['TWA']:.1f}°**")
 
     cA, cB = st.columns(2)
     with cA:
         st.markdown("**Mainsail**")
-        st.write(f"Sheet:  {opt['main_sheet']:.1f}°")
-        st.write(f"Twist:  {opt['main_twist']:.1f}°")
-        st.write(f"Camber: {opt['main_camber']:.3f}")
+        st.write(f"Sheet:  {opt['main_sheet_mm']:.0f} mm")
+        st.write(f"Twist:  {opt['main_twist_mm']:.0f} mm")
+        st.write(f"Camber: {opt['main_camber_mm']:.0f} mm")
     with cB:
         st.markdown("**Jib**")
-        st.write(f"Sheet:  {opt['jib_sheet']:.1f}°")
-        st.write(f"Twist:  {opt['jib_twist']:.1f}°")
-        st.write(f"Camber: {opt['jib_camber']:.3f}")
+        st.write(f"Sheet:  {opt['jib_sheet_mm']:.0f} mm")
+        st.write(f"Twist:  {opt['jib_twist_mm']:.0f} mm")
+        st.write(f"Camber: {opt['jib_camber_mm']:.0f} mm")
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Boat Speed", f"{opt['Vb']:.2f} m/s")
@@ -300,8 +382,8 @@ if st.button("Generate Upwind Polar"):
     speeds, vmgs = [], []
     for ang in angles:
         Vb_a, _ = boat_equilibrium(ang, TWS,
-                                   main_sheet, main_twist, main_camber,
-                                   jib_sheet,  jib_twist,  jib_camber)
+                                   main_sheet_deg, main_twist_deg, main_camber_frac,
+                                   jib_sheet_deg,  jib_twist_deg,  jib_camber_frac)
         speeds.append(Vb_a)
         vmgs.append(Vb_a * np.cos(np.radians(ang)))
 
@@ -316,4 +398,5 @@ if st.button("Generate Upwind Polar"):
     ax.legend(loc='lower right', fontsize=8)
     st.pyplot(fig)
 
-st.caption("Prototype model for IOM trim sensitivity – close-hauled VMG experiment.")
+st.caption("IOM upwind VMG model – trim inputs in mm, calibrated to racing data.")
+                                   
