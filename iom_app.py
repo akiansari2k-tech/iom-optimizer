@@ -166,7 +166,7 @@ def hull_resistance(Vb):
     Cf = 0.075 / (np.log10(Re) - 2.0) ** 2
     
     Fn = Vb / np.sqrt(G * LWL)
-    Cr = 0.003 * (1.0 + 8.0 * Fn ** 3)   # residuary rises near hull speed
+    Cr = 0.005 * (1.0 + 8.0 * Fn ** 3)   # residuary rises near hull speed
     
     wetted_area = 0.14   # m²
     q = 0.5 * RHO_WATER * Vb ** 2
