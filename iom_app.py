@@ -62,40 +62,52 @@ def twist_mm_to_deg(mm, boom_r):
 def sail_drive_coefficient(AWA_deg, sheet_angle_deg, twist_deg, camber_frac,
                            area_fraction):
     """
-    Returns a non-dimensional drive coefficient for one sail.
+    Empirical drive coefficient for one sail.
     
-    The model: the sail produces maximum drive when the sheet angle
-    positions the sail at the optimal angle of attack for the given AWA.
-    Too tight (pinching/luffing) or too loose (stalled) reduces drive.
-    Camber and twist affect the optimum and the width of the efficiency peak.
+    Key insight: sheet length controls leech tension (how well the sail
+    holds its shape and exit angle), NOT the primary angle of attack.
+    Camber is the main source of lift. A tight sheet (small mm) with
+    good camber = efficient attached flow. A loose sheet = leech opens,
+    power spills, drag increases.
     """
-    # Effective angle of attack
-    alpha = AWA_deg - sheet_angle_deg - 0.5 * twist_deg
+    # Effective angle of attack comes primarily from AWA and camber,
+    # NOT from sheet angle directly.
+    # Camber creates lift even when the boom is on centreline.
+    # Think of it as: the sail is a curved wing, camber sets its "built-in" alpha.
+    camber_alpha = 35.0 * camber_frac          # e.g. 0.14 → 4.9° effective alpha from camber
     
-    # Optimal alpha depends on camber: more camber = higher optimal alpha
-    alpha_opt = 8.0 + 40.0 * camber_frac   # e.g. camber 0.14 → optimal α ≈ 13.6°
+    # The geometric boom angle adds to this
+    alpha_eff = camber_alpha + 0.3 * sheet_angle_deg + (AWA_deg - 15.0) * 0.4
     
-    # Drive efficiency: Gaussian-like peak around optimal alpha
-    # Width depends on camber (more camber = wider usable range)
-    sigma = 6.0 + 20.0 * camber_frac       # e.g. camber 0.14 → σ ≈ 8.8°
-    efficiency = np.exp(-0.5 * ((alpha - alpha_opt) / sigma) ** 2)
+    # Optimal effective alpha for max drive
+    alpha_opt = 10.0 + 15.0 * camber_frac     # e.g. 0.14 → 12.1°
     
-    # Twist penalty: some twist is good (matches wind shear), too much spills power
-    twist_opt = 5.0 + 0.1 * AWA_deg        # optimal twist increases with AWA
-    twist_penalty = 1.0 - 0.3 * ((twist_deg - twist_opt) / 10.0) ** 2
+    # Efficiency peak
+    sigma = 8.0 + 15.0 * camber_frac          # e.g. 0.14 → 10.1°
+    efficiency = np.exp(-0.5 * ((alpha_eff - alpha_opt) / sigma) ** 2)
+    
+    # Leech tension effect: tight sheet (small angle) = good leech control
+    # There's a sweet spot: too tight chokes the slot, too loose spills air
+    # For the main, optimal is small (tight leech); for jib, a bit more open
+    leech_opt = 4.0    # degrees — corresponds to ~15 mm on main, ~16 mm on jib
+    leech_penalty = 1.0 - 0.15 * ((sheet_angle_deg - leech_opt) / 8.0) ** 2
+    leech_penalty = np.clip(leech_penalty, 0.4, 1.0)
+    
+    # Twist effect: some twist matches wind shear, too much spills power
+    twist_opt = 5.0 + 0.1 * AWA_deg
+    twist_penalty = 1.0 - 0.25 * ((twist_deg - twist_opt) / 8.0) ** 2
     twist_penalty = np.clip(twist_penalty, 0.3, 1.0)
     
-    # Base drive coefficient (calibrated so that with good trim at 4 m/s TWS,
-    # total aero drive ≈ hull drag at ~2 m/s boat speed)
-    # CL_drive ≈ CL * sin(AWA) - CD * cos(AWA), simplified empirically
+    # Drive coefficient
     AWA_rad = np.radians(AWA_deg)
-    Cd_base = 1.8 * np.sin(AWA_rad) * efficiency * twist_penalty * area_fraction
+    Cd_base = 1.8 * np.sin(AWA_rad) * efficiency * leech_penalty * twist_penalty * area_fraction
     
-    # Negative alpha (sail backwinding) kills drive
-    if alpha < 0:
-        Cd_base *= max(0.0, 1.0 + alpha / 5.0)  # linear falloff below α=0
+    # Very low or negative effective alpha kills drive
+    if alpha_eff < 1.0:
+        Cd_base *= max(0.0, alpha_eff / 1.0)
     
     return max(Cd_base, 0.0)
+                               
 
 
 def total_aero_force(TWA_deg, TWS, Vb,
